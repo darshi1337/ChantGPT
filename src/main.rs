@@ -1,6 +1,8 @@
 use clap::Parser;
 use ndarray::{Array, Array3, Axis};
 use tokenizers::Tokenizer;
+use serde::Deserialize;
+use std::fs::File;
 
 use crate::input_ids::InputIds;
 use tensor::Tensor;
@@ -15,18 +17,27 @@ mod past_key_values;
 mod session_input_builder;
 mod tensor;
 
-// TODO: this are hardcoded now, maybe they are in one of the config.json files?
-const PAD_TOKEN_ID: i64 = 2048;
-const NUM_ENCODER_HEADS: usize = 16;
-const NUM_DECODER_HEADS: usize = 16;
-const NUM_ENCODER_LAYERS: usize = 24;
-const NUM_DECODER_LAYERS: usize = 24;
-const ENCODER_DIM_KV: usize = 64;
-const DECODER_DIM_KV: usize = 64;
-const GUIDANCE_SCALE: usize = 3;
-const TOP_K: usize = 50;
-const MAX_LEN: usize = 100;
-const SAMPLING_RATE: usize = 32000;
+#[derive(Deserialize)]
+struct Config {
+    PAD_TOKEN_ID: i64,
+    NUM_ENCODER_HEADS: usize,
+    NUM_DECODER_HEADS: usize,
+    NUM_ENCODER_LAYERS: usize,
+    NUM_DECODER_LAYERS: usize,
+    ENCODER_DIM_KV: usize,
+    DECODER_DIM_KV: usize,
+    GUIDANCE_SCALE: usize,
+    TOP_K: usize,
+    MAX_LEN: usize,
+    SAMPLING_RATE: usize,
+}
+
+impl Config {
+    fn get() -> Self {
+        let file = File::open("config.json").expect("Could not open config file");
+        serde_json::from_reader(file).expect("Could not parse config file")
+    }
+}
 
 #[derive(Parser)]
 struct Args {
@@ -35,6 +46,7 @@ struct Args {
 }
 
 struct MusicGen {
+    config: Config,
     tokenizer: Tokenizer,
     text_encoder: ort::Session,
     decoder_model_merged: ort::Session,
@@ -44,6 +56,8 @@ struct MusicGen {
 
 impl MusicGen {
     fn load() -> ort::Result<Self> {
+        let config: Config = Config::get();
+
         let mut tokenizer = Tokenizer::from_file("onnx/tokenizer.json")?;
 
         tokenizer.with_padding(None).with_truncation(None)?;
@@ -69,6 +83,7 @@ impl MusicGen {
             .commit_from_file("onnx/encodec_decode.onnx")?;
 
         Ok(Self {
+            config,
             tokenizer,
             text_encoder,
             decoder_model_merged: decoder,
@@ -128,18 +143,18 @@ impl MusicGen {
         let encoder_attention_mask = attention_mask.dupe_zeros_along_first_dim();
 
         let mut input_ids = InputIds::<4>::new();
-        input_ids.push([PAD_TOKEN_ID, PAD_TOKEN_ID, PAD_TOKEN_ID, PAD_TOKEN_ID]);
+        input_ids.push([self.config.PAD_TOKEN_ID, self.config.PAD_TOKEN_ID, self.config.PAD_TOKEN_ID, self.config.PAD_TOKEN_ID]);
         let mut past_key_values = PastKeyValues::empty(PastKeyValuesConfig {
-            num_encoder_heads: NUM_ENCODER_HEADS,
-            num_decoder_heads: NUM_DECODER_HEADS,
-            encoder_dim_kv: ENCODER_DIM_KV,
-            decoder_dim_kv: DECODER_DIM_KV,
-            num_decoder_layers: NUM_DECODER_LAYERS,
+            num_encoder_heads: self.config.NUM_ENCODER_HEADS,
+            num_decoder_heads: self.config.NUM_DECODER_HEADS,
+            encoder_dim_kv: self.config.ENCODER_DIM_KV,
+            decoder_dim_kv: self.config.DECODER_DIM_KV,
+            num_decoder_layers: self.config.NUM_DECODER_LAYERS,
         });
 
-        for _ in 0..MAX_LEN {
+        for _ in 0..self.config.MAX_LEN {
             let prepared_input_ids = input_ids
-                .apply_delay_pattern_mask(PAD_TOKEN_ID)
+                .apply_delay_pattern_mask(self.config.PAD_TOKEN_ID)
                 .last()
                 .unsqueeze(1)
                 .dupe_along_first_dim();
@@ -162,10 +177,10 @@ impl MusicGen {
 
             // logits: float32[batch_size,decoder_sequence_length,2048]
             let logits = Logits::from_3d_dyn_value(&outputs[0])?;
-            let logits = logits.apply_free_guidance(GUIDANCE_SCALE);
+            let logits = logits.apply_free_guidance(self.config.GUIDANCE_SCALE);
             // println!("logits: {logits:?}\n");
 
-            input_ids.push(logits.sample(TOP_K).iter().map(|e| e.0));
+            input_ids.push(logits.sample(self.config.TOP_K).iter().map(|e| e.0));
             // println!("generated input_ids: {input_ids:?}\n");
 
             // `outputs` is:
@@ -211,7 +226,7 @@ impl MusicGen {
 
         let mut data = vec![];
         for i in 0..bs_x_codebooks * seq_len {
-            if input_ids[i] == PAD_TOKEN_ID {
+            if input_ids[i] == self.config.PAD_TOKEN_ID {
                 continue;
             }
 
@@ -256,7 +271,7 @@ fn main() -> anyhow::Result<()> {
 
     let spec = hound::WavSpec {
         channels: 1,
-        sample_rate: SAMPLING_RATE as u32,
+        sample_rate: music_gen.config.SAMPLING_RATE as u32,
         bits_per_sample: 32,
         sample_format: hound::SampleFormat::Float,
     };
