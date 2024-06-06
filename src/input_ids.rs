@@ -49,17 +49,15 @@ impl<const N: usize> InputIds<N> {
         assert_eq!(i, N, "Expected exactly {N} token_ids");
     }
 
-    pub fn apply_delay_pattern_mask(&self, pad_token_id: i64) -> Self {
-        // TODO: copying the whole array each time is not efficient.
-        let mut batches = self.batches.clone();
-        for i in 0..batches.len() {
-            for j in 0..batches[0].len() {
+    pub fn apply_delay_pattern_mask(&mut self, pad_token_id: i64) -> &mut Self{
+        for i in 0..self.batches.len() {
+            for j in 0..self.batches[0].len() {
                 if i % N >= j {
-                    batches[i][j] = pad_token_id;
+                    self.batches[i][j] = pad_token_id;
                 }
             }
         }
-        Self { batches }
+        self
     }
 
     pub fn last(&self) -> Tensor<i64> {
